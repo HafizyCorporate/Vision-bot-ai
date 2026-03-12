@@ -3,3 +3,4 @@ pyTelegramBotAPI
 opencv-python-headless
 numpy
 ultralytics
+easyocr
