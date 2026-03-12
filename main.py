@@ -4,11 +4,11 @@ import cv2
 import numpy as np
 import telebot
 import threading
+import easyocr # <-- INI DIA OTAK PEMBACA HURUFNYA
 from flask import Flask, request, jsonify
 from ultralytics import YOLO
 
-# --- 1. SETUP VARIABEL & BOT ---
-# Ambil rahasia dari environment Railway
+# --- 1. SETUP VARIABEL ---
 TOKEN = os.environ.get("BOT_TOKEN", "TOKEN_BOT_KAMU")
 CHAT_ID = os.environ.get("CHAT_ID", "CHAT_ID_KAMU_BERUPA_ANGKA")
 PORT = int(os.environ.get("PORT", 8080))
@@ -16,15 +16,20 @@ PORT = int(os.environ.get("PORT", 8080))
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# --- 2. LOAD OTAK AI ---
+# --- 2. LOAD 2 OTAK AI SEKALIGUS ---
 print("Memuat model YOLOv8 Nano...")
-model = YOLO('yolov8n.pt') # Pakai versi Nano agar server Railway gratisan tidak RAM bocor
-# --- 3. GERBANG PENERIMA FOTO DARI NODE.JS ---
+model = YOLO('yolov8n.pt')
+
+print("Memuat model OCR Pembaca Plat...")
+# Peringatan: Ini lumayan berat buat server gratisan!
+reader = easyocr.Reader(['en'], gpu=False) 
+
+# --- 3. GERBANG PENERIMA VISION ---
 @app.route('/vision', methods=['POST'])
 def vision_endpoint():
     data = request.json
     if not data or 'image' not in data:
-        return jsonify({"error": "Data gambar kosong"}), 400
+        return jsonify({"error": "Data kosong"}), 400
         
     try:
         image_b64 = data['image'].split(',')[1] if ',' in data['image'] else data['image']
@@ -32,49 +37,61 @@ def vision_endpoint():
         image_arr = np.frombuffer(image_bytes, dtype=np.uint8)
         img = cv2.imdecode(image_arr, cv2.IMREAD_COLOR)
         
-        print("[VISION] Menganalisis frame...")
         results = model(img)
         
-        deteksi_ada = False
+        deteksi_kendaraan = False
+        plat_terbaca = ""
+        
+        # Bedah hasil pelihatan YOLO
         for r in results:
-            if len(r.boxes) > 0:
-                deteksi_ada = True
-                break
+            for box in r.boxes:
+                kelas_id = int(box.cls[0])
+                # ID COCO: 2=Mobil, 3=Motor, 5=Bus, 7=Truk
+                if kelas_id in [2, 3, 5, 7]: 
+                    deteksi_kendaraan = True
+                    
+                    # Potong gambar persis di area kendaraan biar OCR fokus
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    kendaraan_img = img[y1:y2, x1:x2]
+                    
+                    # Suruh OCR membaca teks di potongan gambar itu
+                    teks_hasil = reader.readtext(kendaraan_img, detail=0)
+                    if teks_hasil:
+                        plat_terbaca += " ".join(teks_hasil) + " | "
                 
-        # Gambar kotak merah/label di foto hasil (kalau ada)
+        # Gambar kotak di foto asli
         res_plotted = results[0].plot()
         _, buffer = cv2.imencode('.jpg', res_plotted)
         foto_final = buffer.tobytes()
 
-        # SEKARANG KITA PAKSA DIA SELALU KIRIM KE TELEGRAM!
-        if deteksi_ada:
-            bot.send_photo(CHAT_ID, foto_final, caption="⚠️ [ALERT] ADA OBJEK TERDETEKSI!")
-            print("[VISION] Ancaman dilaporkan ke Markas!")
+        # Eksekusi Laporan ke Telegram
+        if deteksi_kendaraan:
+            pesan = "🚓 [ETLE ALERT] KENDARAAN TERDETEKSI!\n\n"
+            if plat_terbaca:
+                pesan += f"🔍 Teks Terbaca: {plat_terbaca}"
+            else:
+                pesan += "❌ Plat nomor tidak terlihat/terbaca."
+                
+            bot.send_photo(CHAT_ID, foto_final, caption=pesan)
+            print("[VISION] Laporan ETLE dikirim!")
         else:
-            bot.send_photo(CHAT_ID, foto_final, caption="✅ [INFO] Area terpantau aman (Tidak ada objek).")
-            print("[VISION] Foto aman dilaporkan ke Markas!")
+            print("[VISION] Area aman, tidak ada kendaraan.")
             
-        return jsonify({"status": "Laporan terkirim"}), 200
+        return jsonify({"status": "Diproses"}), 200
             
     except Exception as e:
-        print(f"Error sistem vision: {e}")
-        return jsonify({"error": "Otak AI gagal memproses"}), 500
+        print(f"Error ETLE: {e}")
+        return jsonify({"error": "Server overload"}), 500
 
-# --- 4. FUNGSI REMOTE CONTROL (TELEGRAM) ---
+# --- 4. FUNGSI TELEGRAM & RUNNER ---
 @bot.message_handler(commands=['land'])
 def command_land(message):
-    bot.reply_to(message, "🔴 PERINTAH DITERIMA: Wahana mendarat darurat sekarang!")
-    # (Di pengembangan selanjutnya, bot ini bisa nembak API balik ke Node.js)
+    bot.reply_to(message, "🔴 PERINTAH DITERIMA: Sistem siaga!")
 
-# --- 5. MESIN PENGGERAK GANDA (THREADING) ---
 def run_bot():
     bot.infinity_polling()
 
 if __name__ == '__main__':
-    # Jalankan Bot Telegram di jalur belakang (Background Thread)
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.start()
-    
-    # Jalankan API Penerima Foto di jalur utama
-    print(f"🔥 Server Vision API aktif di port {PORT}...")
     app.run(host="0.0.0.0", port=PORT)
