@@ -9,7 +9,7 @@ from ultralytics import YOLO
 
 # --- 1. SETUP VARIABEL & BOT ---
 # Ambil rahasia dari environment Railway
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "TOKEN_BOT_KAMU")
+TOKEN = os.environ.get("BOT_TOKEN", "TOKEN_BOT_KAMU")
 CHAT_ID = os.environ.get("CHAT_ID", "CHAT_ID_KAMU_BERUPA_ANGKA")
 PORT = int(os.environ.get("PORT", 8080))
 
