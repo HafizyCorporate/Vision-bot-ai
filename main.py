@@ -19,7 +19,6 @@ app = Flask(__name__)
 # --- 2. LOAD OTAK AI ---
 print("Memuat model YOLOv8 Nano...")
 model = YOLO('yolov8n.pt') # Pakai versi Nano agar server Railway gratisan tidak RAM bocor
-
 # --- 3. GERBANG PENERIMA FOTO DARI NODE.JS ---
 @app.route('/vision', methods=['POST'])
 def vision_endpoint():
@@ -28,40 +27,34 @@ def vision_endpoint():
         return jsonify({"error": "Data gambar kosong"}), 400
         
     try:
-        # A. Bersihkan header base64 dari HTML (data:image/jpeg;base64,...)
         image_b64 = data['image'].split(',')[1] if ',' in data['image'] else data['image']
-        
-        # B. Ubah Base64 jadi gambar matriks OpenCV
         image_bytes = base64.b64decode(image_b64)
         image_arr = np.frombuffer(image_bytes, dtype=np.uint8)
         img = cv2.imdecode(image_arr, cv2.IMREAD_COLOR)
         
-        # C. Eksekusi Mata AI YOLOv8
         print("[VISION] Menganalisis frame...")
         results = model(img)
         
-        # D. Cek apakah ada target yang terdeteksi
         deteksi_ada = False
         for r in results:
             if len(r.boxes) > 0:
                 deteksi_ada = True
                 break
                 
+        # Gambar kotak merah/label di foto hasil (kalau ada)
+        res_plotted = results[0].plot()
+        _, buffer = cv2.imencode('.jpg', res_plotted)
+        foto_final = buffer.tobytes()
+
+        # SEKARANG KITA PAKSA DIA SELALU KIRIM KE TELEGRAM!
         if deteksi_ada:
-            # Gambar kotak merah/label di foto hasil
-            res_plotted = results[0].plot()
-            
-            # Ubah balik ke format JPG untuk dikirim via Telegram
-            _, buffer = cv2.imencode('.jpg', res_plotted)
-            foto_final = buffer.tobytes()
-            
-            # Tembak laporan ke HP Bos!
-            bot.send_photo(CHAT_ID, foto_final, caption="⚠️ [ALERT] Objek Terdeteksi di Jalur Drone!")
+            bot.send_photo(CHAT_ID, foto_final, caption="⚠️ [ALERT] ADA OBJEK TERDETEKSI!")
             print("[VISION] Ancaman dilaporkan ke Markas!")
-            return jsonify({"status": "Deteksi dilaporkan"}), 200
         else:
-            print("[VISION] Area aman, tidak ada objek.")
-            return jsonify({"status": "Aman"}), 200
+            bot.send_photo(CHAT_ID, foto_final, caption="✅ [INFO] Area terpantau aman (Tidak ada objek).")
+            print("[VISION] Foto aman dilaporkan ke Markas!")
+            
+        return jsonify({"status": "Laporan terkirim"}), 200
             
     except Exception as e:
         print(f"Error sistem vision: {e}")
