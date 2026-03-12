@@ -1,5 +1,5 @@
-opencv-python-headless
-ultralytics
+flask
 pyTelegramBotAPI
+opencv-python-headless
 numpy
-requests
+ultralytics
