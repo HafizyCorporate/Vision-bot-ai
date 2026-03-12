@@ -4,9 +4,9 @@ FROM python:3.11-slim
 # 2. Bikin folder kerja di dalam server
 WORKDIR /app
 
-# 3. PAKSA install semua komponen layar (GUI) yang diminta OpenCV
+# 3. PAKSA install semua komponen layar (GUI) dengan nama versi terbaru
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxrender1 \
