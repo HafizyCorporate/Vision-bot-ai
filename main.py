@@ -1,58 +1,87 @@
 import os
+import base64
 import cv2
-import telebot
 import numpy as np
-import requests
+import telebot
+import threading
+from flask import Flask, request, jsonify
 from ultralytics import YOLO
 
-# Ambil token dari server Railway nanti
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-bot = telebot.TeleBot(BOT_TOKEN)
+# --- 1. SETUP VARIABEL & BOT ---
+# Ambil rahasia dari environment Railway
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "TOKEN_BOT_KAMU")
+CHAT_ID = os.environ.get("CHAT_ID", "CHAT_ID_KAMU_BERUPA_ANGKA")
+PORT = int(os.environ.get("PORT", 8080))
 
-print("Memuat model AI Vision (YOLOv8)...")
-model = YOLO('yolov8n.pt')
-print("Sistem Siap!")
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "🔥 Sistem AI Aktif. Kirimkan foto ke sini, dan saya akan mendeteksi objek di dalamnya.")
+# --- 2. LOAD OTAK AI ---
+print("Memuat model YOLOv8 Nano...")
+model = YOLO('yolov8n.pt') # Pakai versi Nano agar server Railway gratisan tidak RAM bocor
 
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
+# --- 3. GERBANG PENERIMA FOTO DARI NODE.JS ---
+@app.route('/vision', methods=['POST'])
+def vision_endpoint():
+    data = request.json
+    if not data or 'image' not in data:
+        return jsonify({"error": "Data gambar kosong"}), 400
+        
     try:
-        bot.reply_to(message, "Menganalisis gambar... ⏳")
+        # A. Bersihkan header base64 dari HTML (data:image/jpeg;base64,...)
+        image_b64 = data['image'].split(',')[1] if ',' in data['image'] else data['image']
         
-        # Download foto dari Telegram
-        file_info = bot.get_file(message.photo[-1].file_id)
-        file_url = f'https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}'
-        response = requests.get(file_url)
+        # B. Ubah Base64 jadi gambar matriks OpenCV
+        image_bytes = base64.b64decode(image_b64)
+        image_arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(image_arr, cv2.IMREAD_COLOR)
         
-        # Ubah foto agar bisa dibaca AI
-        image_array = np.asarray(bytearray(response.content), dtype="uint8")
-        img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        
-        # AI mulai mendeteksi
+        # C. Eksekusi Mata AI YOLOv8
+        print("[VISION] Menganalisis frame...")
         results = model(img)
-        annotated_frame = results[0].plot()
         
-        # Catat objek apa saja yang ketemu
-        detected_items = [model.names[int(box.cls[0])] for r in results for box in r.boxes]
-        
-        if len(detected_items) > 0:
-            summary = {item: detected_items.count(item) for item in set(detected_items)}
-            teks_balasan = "🎯 **Hasil Deteksi:**\n"
-            for obj, count in summary.items():
-                teks_balasan += f"- {obj}: {count}\n"
-        else:
-            teks_balasan = "⚠️ Tidak ada objek yang dikenali."
+        # D. Cek apakah ada target yang terdeteksi
+        deteksi_ada = False
+        for r in results:
+            if len(r.boxes) > 0:
+                deteksi_ada = True
+                break
+                
+        if deteksi_ada:
+            # Gambar kotak merah/label di foto hasil
+            res_plotted = results[0].plot()
             
-        # Simpan & kirim balik foto hasilnya
-        cv2.imwrite("hasil.jpg", annotated_frame)
-        with open("hasil.jpg", 'rb') as photo:
-            bot.send_photo(message.chat.id, photo, caption=teks_balasan)
+            # Ubah balik ke format JPG untuk dikirim via Telegram
+            _, buffer = cv2.imencode('.jpg', res_plotted)
+            foto_final = buffer.tobytes()
+            
+            # Tembak laporan ke HP Bos!
+            bot.send_photo(CHAT_ID, foto_final, caption="⚠️ [ALERT] Objek Terdeteksi di Jalur Drone!")
+            print("[VISION] Ancaman dilaporkan ke Markas!")
+            return jsonify({"status": "Deteksi dilaporkan"}), 200
+        else:
+            print("[VISION] Area aman, tidak ada objek.")
+            return jsonify({"status": "Aman"}), 200
             
     except Exception as e:
-        bot.reply_to(message, "Error: Gambar gagal diproses.")
+        print(f"Error sistem vision: {e}")
+        return jsonify({"error": "Otak AI gagal memproses"}), 500
+
+# --- 4. FUNGSI REMOTE CONTROL (TELEGRAM) ---
+@bot.message_handler(commands=['land'])
+def command_land(message):
+    bot.reply_to(message, "🔴 PERINTAH DITERIMA: Wahana mendarat darurat sekarang!")
+    # (Di pengembangan selanjutnya, bot ini bisa nembak API balik ke Node.js)
+
+# --- 5. MESIN PENGGERAK GANDA (THREADING) ---
+def run_bot():
+    bot.infinity_polling()
 
 if __name__ == '__main__':
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    # Jalankan Bot Telegram di jalur belakang (Background Thread)
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.start()
+    
+    # Jalankan API Penerima Foto di jalur utama
+    print(f"🔥 Server Vision API aktif di port {PORT}...")
+    app.run(host="0.0.0.0", port=PORT)
