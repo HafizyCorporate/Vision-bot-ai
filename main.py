@@ -58,7 +58,7 @@ def gambar_custom_kotak(frame, hasil_ai):
 
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video... Mengaktifkan Filter Penajam Gambar ala NASA!")
+    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video... Mengaktifkan Mode Teropong HD & Filter Penajam Gambar NASA!")
     
     try:
         if message.content_type == 'video':
@@ -89,7 +89,8 @@ def handle_video(message):
             ret, frame = cap.read()
             if not ret: break
                 
-            results = model_helm(frame, conf=0.20, imgsz=640, verbose=False)
+            # 🔥 SUNTIKAN SYSADMIN: conf diturunin ke 0.10, imgsz dinaikin ke 1280 (HD) biar bisa lihat CCTV jauh!
+            results = model_helm(frame, conf=0.10, imgsz=1280, verbose=False)
             frame_plotted, pelanggar_di_frame, max_area = gambar_custom_kotak(frame, results)
             
             if pelanggar_di_frame > max_pelanggar_terekam: 
@@ -112,7 +113,8 @@ def handle_video(message):
         if best_evidence_frame is not None:
             bot.send_message(message.chat.id, "🔍 *Memotong Plat & Menjalankan Filter Sharpening...*", parse_mode='Markdown')
             
-            hasil_plat = model_plat(best_evidence_frame, conf=0.15, verbose=False)
+            # 🔥 SUNTIKAN SYSADMIN: Otak Plat Nomor juga dipaksa pakai mode HD (1280)
+            hasil_plat = model_plat(best_evidence_frame, conf=0.05, imgsz=1280, verbose=False)
             plat_terbaca = "Plat tidak terlihat"
             plat_final = None # Buat nyimpen gambar cucian
             
@@ -121,7 +123,7 @@ def handle_video(message):
                 px1, py1, px2, py2 = map(int, box_plat.xyxy[0])
                 potongan_plat = best_evidence_frame[py1:py2, px1:px2]
                 
-                # 🔥 TAKTIK NASA ENHANCEMENT 🔥
+                # 🔥 TAKTIK NASA ENHANCEMENT (TIDAK ADA YANG DIHAPUS) 🔥
                 # 1. Zoom 3x lipat
                 plat_zoom = cv2.resize(potongan_plat, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                 
@@ -194,7 +196,7 @@ def handle_video(message):
 def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message): bot.reply_to(message, "🔴 ETLE MATA ELANG V2 AKTIF!")
+def command_land(message): bot.reply_to(message, "🔴 ETLE SUPER HD MATA ELANG AKTIF!")
 
 def run_bot(): bot.infinity_polling()
 
