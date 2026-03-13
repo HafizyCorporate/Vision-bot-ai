@@ -59,7 +59,7 @@ def gambar_custom_kotak(frame, hasil_ai):
 
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video CCTV Jauh... Mengaktifkan Mode FULL HD (1920p) & Scanner B&W!")
+    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video... Mengaktifkan Mode Natural & Perekam Waktu (Timestamp)!")
     
     try:
         if message.content_type == 'video':
@@ -85,13 +85,15 @@ def handle_video(message):
         max_pelanggar_terekam = 0 
         largest_rider_ever = 0
         best_evidence_frame = None 
+        waktu_kejadian_ms = 0 # Menyimpan waktu saat jepretan terjadi
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
                 
-            # 🔥 PAKSA AI LIHAT VIDEO SEBAGAI FULL HD (1920) BIAR HELM DARI JAUH KELIATAN 🔥
-            # conf=0.05 -> super sensitif nyari bentuk lengkung helm
+            waktu_saat_ini_ms = cap.get(cv2.CAP_PROP_POS_MSEC) # Ambil waktu video berjalan
+                
+            # Mode Full HD tetep diaktifin biar CCTV jauh bisa kebaca
             results = model_helm(frame, conf=0.05, imgsz=1920, verbose=False)
             frame_plotted, pelanggar_di_frame, max_area = gambar_custom_kotak(frame, results)
             
@@ -101,6 +103,7 @@ def handle_video(message):
             if max_area > largest_rider_ever:
                 largest_rider_ever = max_area
                 best_evidence_frame = frame_plotted.copy()
+                waktu_kejadian_ms = waktu_saat_ini_ms # Kunci waktu kejadiannya!
                 
             out.write(frame_plotted)
             
@@ -111,11 +114,9 @@ def handle_video(message):
             bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\n🟢 Aman | 🔴 No Helm", parse_mode='Markdown')
             
         if best_evidence_frame is not None:
-            bot.send_message(message.chat.id, "🔍 *Mencari & Membaca SEMUA Plat Nomor di lokasi...*", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "🔍 *Mengekstrak Plat Nomor (Natural Mode)...*", parse_mode='Markdown')
             
-            # 🔥 PLAT JUGA NYARI PAKAI RESOLUSI FULL HD (1920) 🔥
             hasil_plat = model_plat(best_evidence_frame, conf=0.05, imgsz=1920, verbose=False)
-            
             daftar_plat_terbaca = []
             
             if len(hasil_plat[0].boxes) > 0:
@@ -123,38 +124,20 @@ def handle_video(message):
                     px1, py1, px2, py2 = map(int, box_plat.xyxy[0])
                     potongan_plat = best_evidence_frame[py1:py2, px1:px2]
                     
-                    # 🔥 TAKTIK CUCI FOTO MESIN FOTOCOPY (BINARIZATION) 🔥
-                    # 1. Zoom 4x biar gede sekalian
-                    plat_zoom = cv2.resize(potongan_plat, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+                    # 🔥 TAKTIK NATURAL: Cuma di-zoom 3x tanpa mengubah warna sama sekali 🔥
+                    plat_zoom = cv2.resize(potongan_plat, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                     
-                    # 2. Jadiin Abu-abu murni
-                    plat_gray = cv2.cvtColor(plat_zoom, cv2.COLOR_BGR2GRAY)
-                    
-                    # 3. Hapus noise/semut di jalanan
-                    plat_denoise = cv2.fastNlMeansDenoising(plat_gray, None, 10, 7, 21)
-                    
-                    # 4. Otsu Threshold (Ubah gambar jadi cuma ada warna Hitam dan Putih murni, tanpa ada abu-abu)
-                    _, plat_final = cv2.threshold(plat_denoise, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    
-                    # 5. Baca teks
-                    teks_hasil = reader.readtext(plat_final, detail=0, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                    # Langsung baca pakai OCR
+                    teks_hasil = reader.readtext(plat_zoom, detail=0, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                     
                     if teks_hasil: 
                         teks_bersih = "".join(teks_hasil).replace(" ", "")
                         daftar_plat_terbaca.append(f"👉 `{teks_bersih}`")
                     else: 
-                        daftar_plat_terbaca.append(f"👉 `[Plat {i+1} Terlalu Jauh/Buram]`")
+                        daftar_plat_terbaca.append(f"👉 `[Plat {i+1} Tidak Terbaca]`")
                         
                     cv2.rectangle(best_evidence_frame, (px1, py1), (px2, py2), (255, 0, 0), 3) 
                     cv2.putText(best_evidence_frame, f"PLAT {i+1}", (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                    
-                    # Debug Foto Plat (biar kamu tau fotonya berubah jadi hitam putih)
-                    debug_path = f"debug_plat_{i}.jpg"
-                    cv2.imwrite(debug_path, plat_final)
-                    with open(debug_path, 'rb') as debug_foto:
-                        bot.send_photo(message.chat.id, debug_foto, caption=f"🤖 DEBUG: Hasil Cucian Plat {i+1}", parse_mode='Markdown')
-                    os.remove(debug_path)
-                    
             else:
                 daftar_plat_terbaca.append("❌ Tidak ada plat nomor yang terdeteksi.")
 
@@ -162,15 +145,22 @@ def handle_video(message):
             bukti_path = "bukti_tilang.jpg"
             cv2.imwrite(bukti_path, best_evidence_frame)
             
+            # --- KONVERSI WAKTU KEJADIAN ---
+            detik_total = int(waktu_kejadian_ms / 1000)
+            menit_kejadian = detik_total // 60
+            detik_kejadian = detik_total % 60
+            waktu_video_str = f"{menit_kejadian:02d}:{detik_kejadian:02d}"
+            
             waktu_wib = datetime.utcnow() + timedelta(hours=7)
             status_helm = "Ada Pelanggaran (Tidak Pakai Helm)" if max_pelanggar_terekam > 0 else "Aman (Semua Pakai Helm)"
             
             surat_tilang = (
-                "🚨 *LAPORAN SCAN KENDARAAN ETLE* 🚨\n\n"
+                "🚨 *BUKTI PELANGGARAN ETLE* 🚨\n\n"
                 f"📅 *Tanggal:* {waktu_wib.strftime('%d %B %Y')}\n"
-                f"⏰ *Waktu:* {waktu_wib.strftime('%H:%M:%S WIB')}\n"
-                f"⚠️ *Status Helm:* {status_helm}\n\n"
-                f"🔍 *HASIL SCAN SEMUA PLAT NOMOR:*\n"
+                f"⏰ *Waktu Server:* {waktu_wib.strftime('%H:%M:%S WIB')}\n"
+                f"⏱️ *Waktu di Video:* Detik ke-{waktu_video_str}\n"
+                f"⚠️ *Status:* {status_helm}\n\n"
+                f"🔍 *HASIL SCAN PLAT NOMOR:*\n"
                 f"{teks_semua_plat}"
             )
             
@@ -191,7 +181,7 @@ def handle_video(message):
 def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message): bot.reply_to(message, "🔴 ETLE FULL HD 1920p AKTIF!")
+def command_land(message): bot.reply_to(message, "🔴 ETLE NATURAL MODE AKTIF!")
 
 def run_bot(): bot.infinity_polling()
 
