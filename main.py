@@ -27,7 +27,6 @@ model_plat = YOLO('license_plate_detector.pt')
 print("Memuat Otak 3: Pembaca Huruf (OCR)...")
 reader = easyocr.Reader(['en'], gpu=False) 
 
-# --- FUNGSI TUKANG GAMBAR KOTAK ---
 def gambar_custom_kotak(frame, hasil_ai):
     frame_gambar = frame.copy()
     jumlah_pelanggar = 0
@@ -57,10 +56,9 @@ def gambar_custom_kotak(frame, hasil_ai):
         
     return frame_gambar, jumlah_pelanggar, max_area_pelanggar
 
-# --- 3. FITUR UTAMA: RENDER VIDEO VIA TELEGRAM ---
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Video diterima! Mengaktifkan Radar Helm & Scanner Plat Nomor (Mode Mata Elang)...")
+    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video... Mengaktifkan Filter Penajam Gambar ala NASA!")
     
     try:
         if message.content_type == 'video':
@@ -106,46 +104,58 @@ def handle_video(message):
         cap.release()
         out.release()
         
-        # --- KIRIM VIDEO ---
+        # --- KIRIM VIDEO FULL ---
         with open(output_path, 'rb') as video_file:
-            bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\n🟢 Hijau: Aman\n🔴 Merah: No Helm", parse_mode='Markdown')
+            bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\n🟢 Aman | 🔴 No Helm", parse_mode='Markdown')
             
-        # --- KIRIM SS & OCR ---
+        # --- KIRIM SS, ENHANCEMENT & OCR ---
         if best_evidence_frame is not None:
-            bot.send_message(message.chat.id, "🔍 *Mencuci & Mempertajam Foto Plat Nomor...*", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "🔍 *Memotong Plat & Menjalankan Filter Sharpening...*", parse_mode='Markdown')
             
             hasil_plat = model_plat(best_evidence_frame, conf=0.15, verbose=False)
-            plat_terbaca = "Plat tidak terlihat di kamera"
+            plat_terbaca = "Plat tidak terlihat"
+            plat_final = None # Buat nyimpen gambar cucian
             
             if len(hasil_plat[0].boxes) > 0:
                 box_plat = hasil_plat[0].boxes[0]
                 px1, py1, px2, py2 = map(int, box_plat.xyxy[0])
                 potongan_plat = best_evidence_frame[py1:py2, px1:px2]
                 
-                # 🔥 TAKTIK ENHANCEMENT GAMBAR (MATA ELANG) 🔥
-                # 1. Zoom gambar 3x lipat biar mulus
+                # 🔥 TAKTIK NASA ENHANCEMENT 🔥
+                # 1. Zoom 3x lipat
                 plat_zoom = cv2.resize(potongan_plat, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                 
-                # 2. Ubah jadi Hitam Putih (Grayscale) biar AI gak bingung warna
-                plat_hitam_putih = cv2.cvtColor(plat_zoom, cv2.COLOR_BGR2GRAY)
+                # 2. Hitam Putih
+                plat_gray = cv2.cvtColor(plat_zoom, cv2.COLOR_BGR2GRAY)
                 
-                # 3. Baca pakai OCR (Paksa HANYA baca huruf dan angka!)
+                # 3. Sharpening Filter (Bikin tepi huruf tajem kayak silet)
+                kernel_sharpening = np.array([[-1,-1,-1], [-1, 9,-1], [-1,-1,-1]])
+                plat_sharp = cv2.filter2D(plat_gray, -1, kernel_sharpening)
+                
+                # 4. CLAHE (Naikin kontras ekstrem)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                plat_final = clahe.apply(plat_sharp)
+                
+                # 5. Blur dikit buat ngilangin noise pasir
+                plat_final = cv2.GaussianBlur(plat_final, (3,3), 0)
+                
+                # Baca pakai OCR
                 teks_hasil = reader.readtext(
-                    plat_hitam_putih, 
+                    plat_final, 
                     detail=0, 
                     mag_ratio=2.0, 
                     allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
                 )
                 
                 if teks_hasil: 
-                    # Gabungin hasilnya kalau bacanya sepotong-sepotong
                     plat_terbaca = "".join(teks_hasil).replace(" ", "")
                 else: 
-                    plat_terbaca = "Terdeteksi Plat, tapi huruf terlalu buram"
+                    plat_terbaca = "Plat terlalu buram walau sudah di-filter"
                     
                 cv2.rectangle(best_evidence_frame, (px1, py1), (px2, py2), (255, 0, 0), 3) 
                 cv2.putText(best_evidence_frame, "PLAT", (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
+            # Simpan SS Jalanan
             bukti_path = "bukti_tilang.jpg"
             cv2.imwrite(bukti_path, best_evidence_frame)
             
@@ -153,18 +163,26 @@ def handle_video(message):
             surat_tilang = (
                 "🚨 *SURAT TILANG ETLE* 🚨\n\n"
                 f"📅 *Tanggal:* {waktu_wib.strftime('%d %B %Y')}\n"
-                f"⏰ *Waktu:* {waktu_wib.strftime('%H:%M:%S WIB')}\n"
-                f"⚠️ *Pelanggaran:* Tidak Menggunakan Helm\n"
-                f"👤 *Jumlah Terduga:* {max_pelanggar_terekam} Orang\n\n"
-                f"🔍 *PLAT NOMOR:* 👉 `{plat_terbaca}` 👈"
+                f"⚠️ *Pelanggaran:* Tidak Menggunakan Helm\n\n"
+                f"🔍 *HASIL SCAN PLAT NOMOR:*\n"
+                f"👉 `{plat_terbaca}` 👈"
             )
             
+            # Kirim SS Jalanan
             with open(bukti_path, 'rb') as foto_bukti:
                 bot.send_photo(message.chat.id, foto_bukti, caption=surat_tilang, parse_mode='Markdown')
             os.remove(bukti_path)
             
+            # 🔥 FITUR DEBUG: KIRIM POTONGAN PLAT HASIL CUCI 🔥
+            if plat_final is not None:
+                debug_path = "debug_plat.jpg"
+                cv2.imwrite(debug_path, plat_final)
+                with open(debug_path, 'rb') as debug_foto:
+                    bot.send_photo(message.chat.id, debug_foto, caption="*🤖 DEBUG AI:* Ini adalah gambar yang dilihat oleh mata AI setelah dicuci. Wajar nggak kalau AI-nya bingung baca?", parse_mode='Markdown')
+                os.remove(debug_path)
+            
         else:
-            bot.send_message(message.chat.id, "✅ *AMAN:* Tidak ada pengendara tanpa helm di video ini.", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "✅ *AMAN:* Tidak ada pelanggar.", parse_mode='Markdown')
             
         os.remove(input_path)
         os.remove(output_path)
@@ -176,7 +194,7 @@ def handle_video(message):
 def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message): bot.reply_to(message, "🔴 ETLE MATA ELANG AKTIF!")
+def command_land(message): bot.reply_to(message, "🔴 ETLE MATA ELANG V2 AKTIF!")
 
 def run_bot(): bot.infinity_polling()
 
