@@ -30,7 +30,7 @@ reader = easyocr.Reader(['en'], gpu=False)
 def gambar_custom_kotak(frame, hasil_ai):
     frame_gambar = frame.copy()
     jumlah_pelanggar = 0
-    max_area_rider = 0 # SEKARANG NGUKUR SEMUA PENGENDARA, BUKAN CUMA PELANGGAR
+    max_area_rider = 0 
     
     for box in hasil_ai[0].boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -38,7 +38,6 @@ def gambar_custom_kotak(frame, hasil_ai):
         kelas_id = int(box.cls[0])
         nama_objek = model_helm.names[kelas_id].lower()
         
-        # Hitung seberapa besar pengendara ini di layar
         area = (x2 - x1) * (y2 - y1)
         if area > max_area_rider: 
             max_area_rider = area
@@ -60,7 +59,7 @@ def gambar_custom_kotak(frame, hasil_ai):
 
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video... Mengaktifkan Mode Teropong HD & Scan SEMUA Kendaraan!")
+    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video CCTV Jauh... Mengaktifkan Mode FULL HD (1920p) & Scanner B&W!")
     
     try:
         if message.content_type == 'video':
@@ -91,7 +90,9 @@ def handle_video(message):
             ret, frame = cap.read()
             if not ret: break
                 
-            results = model_helm(frame, conf=0.10, imgsz=1280, verbose=False)
+            # 🔥 PAKSA AI LIHAT VIDEO SEBAGAI FULL HD (1920) BIAR HELM DARI JAUH KELIATAN 🔥
+            # conf=0.05 -> super sensitif nyari bentuk lengkung helm
+            results = model_helm(frame, conf=0.05, imgsz=1920, verbose=False)
             frame_plotted, pelanggar_di_frame, max_area = gambar_custom_kotak(frame, results)
             
             if pelanggar_di_frame > max_pelanggar_terekam: 
@@ -106,56 +107,62 @@ def handle_video(message):
         cap.release()
         out.release()
         
-        # --- KIRIM VIDEO FULL ---
         with open(output_path, 'rb') as video_file:
             bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\n🟢 Aman | 🔴 No Helm", parse_mode='Markdown')
             
-        # --- KIRIM SS, ENHANCEMENT & SCAN SEMUA PLAT ---
         if best_evidence_frame is not None:
             bot.send_message(message.chat.id, "🔍 *Mencari & Membaca SEMUA Plat Nomor di lokasi...*", parse_mode='Markdown')
             
-            hasil_plat = model_plat(best_evidence_frame, conf=0.05, imgsz=1280, verbose=False)
+            # 🔥 PLAT JUGA NYARI PAKAI RESOLUSI FULL HD (1920) 🔥
+            hasil_plat = model_plat(best_evidence_frame, conf=0.05, imgsz=1920, verbose=False)
             
-            daftar_plat_terbaca = [] # BIKIN LIST BUAT NAMPUNG SEMUA PLAT
+            daftar_plat_terbaca = []
             
-            # 🔥 SUNTIKAN SYSADMIN: LOOPING SEMUA PLAT YANG DITEMUKAN 🔥
             if len(hasil_plat[0].boxes) > 0:
                 for i, box_plat in enumerate(hasil_plat[0].boxes):
                     px1, py1, px2, py2 = map(int, box_plat.xyxy[0])
                     potongan_plat = best_evidence_frame[py1:py2, px1:px2]
                     
-                    # Taktik Cuci Foto NASA
-                    plat_zoom = cv2.resize(potongan_plat, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-                    plat_gray = cv2.cvtColor(plat_zoom, cv2.COLOR_BGR2GRAY)
-                    kernel_sharpening = np.array([[-1,-1,-1], [-1, 9,-1], [-1,-1,-1]])
-                    plat_sharp = cv2.filter2D(plat_gray, -1, kernel_sharpening)
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                    plat_final = clahe.apply(plat_sharp)
-                    plat_final = cv2.GaussianBlur(plat_final, (3,3), 0)
+                    # 🔥 TAKTIK CUCI FOTO MESIN FOTOCOPY (BINARIZATION) 🔥
+                    # 1. Zoom 4x biar gede sekalian
+                    plat_zoom = cv2.resize(potongan_plat, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
                     
-                    teks_hasil = reader.readtext(plat_final, detail=0, mag_ratio=2.0, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+                    # 2. Jadiin Abu-abu murni
+                    plat_gray = cv2.cvtColor(plat_zoom, cv2.COLOR_BGR2GRAY)
+                    
+                    # 3. Hapus noise/semut di jalanan
+                    plat_denoise = cv2.fastNlMeansDenoising(plat_gray, None, 10, 7, 21)
+                    
+                    # 4. Otsu Threshold (Ubah gambar jadi cuma ada warna Hitam dan Putih murni, tanpa ada abu-abu)
+                    _, plat_final = cv2.threshold(plat_denoise, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    
+                    # 5. Baca teks
+                    teks_hasil = reader.readtext(plat_final, detail=0, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                     
                     if teks_hasil: 
                         teks_bersih = "".join(teks_hasil).replace(" ", "")
                         daftar_plat_terbaca.append(f"👉 `{teks_bersih}`")
                     else: 
-                        daftar_plat_terbaca.append(f"👉 `[Plat {i+1} Buram]`")
+                        daftar_plat_terbaca.append(f"👉 `[Plat {i+1} Terlalu Jauh/Buram]`")
                         
                     cv2.rectangle(best_evidence_frame, (px1, py1), (px2, py2), (255, 0, 0), 3) 
                     cv2.putText(best_evidence_frame, f"PLAT {i+1}", (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                    
+                    # Debug Foto Plat (biar kamu tau fotonya berubah jadi hitam putih)
+                    debug_path = f"debug_plat_{i}.jpg"
+                    cv2.imwrite(debug_path, plat_final)
+                    with open(debug_path, 'rb') as debug_foto:
+                        bot.send_photo(message.chat.id, debug_foto, caption=f"🤖 DEBUG: Hasil Cucian Plat {i+1}", parse_mode='Markdown')
+                    os.remove(debug_path)
+                    
             else:
                 daftar_plat_terbaca.append("❌ Tidak ada plat nomor yang terdeteksi.")
 
-            # Gabungkan semua plat pakai Enter
             teks_semua_plat = "\n".join(daftar_plat_terbaca)
-
-            # Simpan SS Jalanan
             bukti_path = "bukti_tilang.jpg"
             cv2.imwrite(bukti_path, best_evidence_frame)
             
             waktu_wib = datetime.utcnow() + timedelta(hours=7)
-            
-            # Ubah status Laporan biar gak nyalahin helm terus
             status_helm = "Ada Pelanggaran (Tidak Pakai Helm)" if max_pelanggar_terekam > 0 else "Aman (Semua Pakai Helm)"
             
             surat_tilang = (
@@ -167,7 +174,6 @@ def handle_video(message):
                 f"{teks_semua_plat}"
             )
             
-            # Kirim SS Jalanan
             with open(bukti_path, 'rb') as foto_bukti:
                 bot.send_photo(message.chat.id, foto_bukti, caption=surat_tilang, parse_mode='Markdown')
             os.remove(bukti_path)
@@ -185,7 +191,7 @@ def handle_video(message):
 def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message): bot.reply_to(message, "🔴 ETLE MULTI-SCAN AKTIF!")
+def command_land(message): bot.reply_to(message, "🔴 ETLE FULL HD 1920p AKTIF!")
 
 def run_bot(): bot.infinity_polling()
 
