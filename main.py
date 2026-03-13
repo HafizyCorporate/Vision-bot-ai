@@ -22,16 +22,28 @@ print("Memuat Otak 1: Deteksi Helm...")
 model_helm = YOLO('helmet.pt') 
 
 print("Memuat Otak 2: Deteksi Plat Nomor...")
-# Pake file yang barusan kamu kasih tahu!
 model_plat = YOLO('license_plate_detector.pt') 
 
 print("Memuat Otak 3: Pembaca Huruf (OCR)...")
 reader = easyocr.Reader(['en'], gpu=False) 
 
-# --- FUNGSI TUKANG GAMBAR KOTAK CUSTOM (KHUSUS HELM) ---
+# --- FUNGSI TUKANG GAMBAR + LOGIKA GARIS MIRING ---
 def gambar_custom_kotak(frame, hasil_ai):
     frame_gambar = frame.copy()
-    jumlah_pelanggar = 0
+    h, w = frame_gambar.shape[:2]
+    
+    # 🚨 SETTING GARIS MIRING (BISA KAMU UBAH SESUAI CCTV) 🚨
+    # pt1 = Titik Kiri (x=0, y=50% dari layar)
+    # pt2 = Titik Kanan (x=mentok kanan, y=80% dari layar)
+    # Efeknya: Garis akan menukik miring dari kiri-atas ke kanan-bawah.
+    pt1 = (0, int(h * 0.5))       
+    pt2 = (w, int(h * 0.8))       
+    
+    cv2.line(frame_gambar, pt1, pt2, (0, 165, 255), 3) # Gambar Garis Oranye
+    cv2.putText(frame_gambar, "GARIS STOP MIRING", (10, pt1[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+
+    jumlah_pelanggar_helm = 0
+    jumlah_pelanggar_garis = 0
     max_area_pelanggar = 0 
     
     for box in hasil_ai[0].boxes:
@@ -40,28 +52,52 @@ def gambar_custom_kotak(frame, hasil_ai):
         kelas_id = int(box.cls[0])
         nama_objek = model_helm.names[kelas_id].lower()
         
+        # Cari titik pusat ban (Tengah X, Bawah Y)
+        titik_tengah_x = int((x1 + x2) / 2)
+        titik_bawah_y = y2
+        
+        # RUMUS MATEMATIKA GARIS MIRING: Mencari batas Y tepat di bawah ban motor
+        if pt2[0] != pt1[0]:
+            kemiringan_m = (pt2[1] - pt1[1]) / (pt2[0] - pt1[0])
+            batas_y_di_titik_x = pt1[1] + kemiringan_m * (titik_tengah_x - pt1[0])
+        else:
+            batas_y_di_titik_x = pt1[1]
+            
+        # Gambar titik kuning di posisi "Ban Motor" biar kelihatan AI ngelacak apa
+        cv2.circle(frame_gambar, (titik_tengah_x, titik_bawah_y), 5, (0, 255, 255), -1)
+
+        # LOGIKA 1: CEK HELM
         if "no" in nama_objek or "without" in nama_objek or "bare" in nama_objek:
             warna = (0, 0, 255) # MERAH
-            label = f"TIDAK PAKAI HELM {conf:.2f}"
-            jumlah_pelanggar += 1
+            label = f"NO HELM {conf:.2f}"
+            jumlah_pelanggar_helm += 1
             area = (x2 - x1) * (y2 - y1)
-            if area > max_area_pelanggar:
-                max_area_pelanggar = area
+            if area > max_area_pelanggar: max_area_pelanggar = area
         else:
             warna = (0, 255, 0) # HIJAU
-            label = f"PAKAI HELM {conf:.2f}"
+            label = f"HELM {conf:.2f}"
             
+        # LOGIKA 2: CEK TEROBOS GARIS MIRING
+        # Kalau Ban Motor (titik_bawah_y) melewati batas kemiringan
+        if titik_bawah_y > batas_y_di_titik_x:
+            warna = (255, 0, 255) # UNGU (Pelanggaran Marka)
+            label = f"TEROBOS BATAS!"
+            jumlah_pelanggar_garis += 1
+            area = (x2 - x1) * (y2 - y1)
+            if area > max_area_pelanggar: max_area_pelanggar = area 
+                
+        # GAMBAR KOTAKNYA
         cv2.rectangle(frame_gambar, (x1, y1), (x2, y2), warna, 2)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame_gambar, (x1, y1 - 20), (x1 + tw, y1), warna, -1)
         cv2.putText(frame_gambar, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-    return frame_gambar, jumlah_pelanggar, max_area_pelanggar
+    return frame_gambar, jumlah_pelanggar_helm, jumlah_pelanggar_garis, max_area_pelanggar
 
 # --- 3. FITUR UTAMA: RENDER VIDEO VIA TELEGRAM ---
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Video diterima! Mengaktifkan 3 Otak AI secara berurutan. Harap tunggu...")
+    bot.reply_to(message, "⚙️ [SYSTEM] Video diterima! Mengaktifkan Radar Garis Miring...")
     
     try:
         if message.content_type == 'video':
@@ -84,24 +120,21 @@ def handle_video(message):
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
         
-        max_pelanggar_terekam = 0 
+        max_helm = 0 
+        max_garis = 0
         largest_violator_ever = 0
         best_evidence_frame = None 
         
-        # --- PROSES VIDEO (CUMA PAKAI OTAK HELM DULU BIAR SERVER GAK JEBOL) ---
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret:
-                break
+            if not ret: break
                 
-            # conf 0.20 biar berani nangkep motor kejauhan dari CCTV
             results = model_helm(frame, conf=0.20, imgsz=640, verbose=False)
-            frame_plotted, pelanggar_di_frame, max_area = gambar_custom_kotak(frame, results)
+            frame_plotted, pel_helm, pel_garis, max_area = gambar_custom_kotak(frame, results)
             
-            if pelanggar_di_frame > max_pelanggar_terekam:
-                max_pelanggar_terekam = pelanggar_di_frame
+            if pel_helm > max_helm: max_helm = pel_helm
+            if pel_garis > max_garis: max_garis = pel_garis
                 
-            # Ambil momen saat pelanggar paling deket sama kamera!
             if max_area > largest_violator_ever:
                 largest_violator_ever = max_area
                 best_evidence_frame = frame_plotted.copy()
@@ -111,84 +144,63 @@ def handle_video(message):
         cap.release()
         out.release()
         
-        # --- LANGKAH 1: KIRIM BALIK VIDEO HELM ---
+        # --- KIRIM VIDEO ---
         with open(output_path, 'rb') as video_file:
-            bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN ETLE SELESAI*", parse_mode='Markdown')
+            bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\n🟢 Hijau: Aman\n🔴 Merah: No Helm\n🟣 Ungu: Terobos Garis Miring", parse_mode='Markdown')
             
-        # --- LANGKAH 2: PROSES SCREENSHOT (PAKAI OTAK PLAT & OCR) ---
-        if best_evidence_frame is not None:
-            bot.send_message(message.chat.id, "🔍 *Sniper Mode Aktif!* Mencari lokasi Plat Nomor di foto...", parse_mode='Markdown')
+        # --- KIRIM SS & OCR ---
+        if best_evidence_frame is not None and (max_helm > 0 or max_garis > 0):
+            bot.send_message(message.chat.id, "🔍 *Mencari Plat Nomor pelanggar...*", parse_mode='Markdown')
             
-            # 1. Suruh Otak ke-2 nyari Plat Nomor di Screenshot Terbaik (conf diset rendah biar sensitif)
             hasil_plat = model_plat(best_evidence_frame, conf=0.15, verbose=False)
             plat_terbaca = "Plat tidak terlihat di kamera"
             
-            # Kalau plat ketemu di foto
             if len(hasil_plat[0].boxes) > 0:
-                # Ambil koordinat kotak plat nomor pertama
                 box_plat = hasil_plat[0].boxes[0]
                 px1, py1, px2, py2 = map(int, box_plat.xyxy[0])
-                
-                # TAKTIK SNIPER: POTONG GAMBARNYA! (CROP)
                 potongan_plat = best_evidence_frame[py1:py2, px1:px2]
-                
-                # 2. Kasih potongan plat itu ke OCR (Otak ke-3) biar fokus ngebaca hurufnya aja!
                 teks_hasil = reader.readtext(potongan_plat, detail=0, mag_ratio=2.5)
                 
-                if teks_hasil:
-                    plat_terbaca = " ".join(teks_hasil).upper()
-                else:
-                    plat_terbaca = "Terdeteksi Plat, tapi huruf terlalu buram"
+                if teks_hasil: plat_terbaca = " ".join(teks_hasil).upper()
+                else: plat_terbaca = "Terdeteksi Plat, huruf buram"
                     
-                # 3. Gambar kotak BIRU di plat nomor untuk Bukti Tilang
-                cv2.rectangle(best_evidence_frame, (px1, py1), (px2, py2), (255, 0, 0), 3) # Kotak Biru Tebal
-                cv2.putText(best_evidence_frame, "PLAT NOMOR", (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                cv2.rectangle(best_evidence_frame, (px1, py1), (px2, py2), (255, 0, 0), 3) 
+                cv2.putText(best_evidence_frame, "PLAT", (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
             bukti_path = "bukti_tilang.jpg"
             cv2.imwrite(bukti_path, best_evidence_frame)
             
+            jenis_pelanggaran = []
+            if max_helm > 0: jenis_pelanggaran.append("Tanpa Helm")
+            if max_garis > 0: jenis_pelanggaran.append("Terobos Garis CCTV Miring")
+            teks_pelanggaran = " & ".join(jenis_pelanggaran)
+
             waktu_wib = datetime.utcnow() + timedelta(hours=7)
             surat_tilang = (
-                "🚨 *SURAT TILANG ELEKTRONIK (ETLE)* 🚨\n\n"
+                "🚨 *SURAT TILANG ETLE* 🚨\n\n"
                 f"📅 *Tanggal:* {waktu_wib.strftime('%d %B %Y')}\n"
-                f"⏰ *Waktu:* {waktu_wib.strftime('%H:%M:%S WIB')}\n"
-                f"⚠️ *Jenis Pelanggaran:* Tidak Menggunakan Helm\n\n"
-                f"🔍 *HASIL SCAN PLAT NOMOR:*\n"
-                f"👉 `{plat_terbaca}` 👈\n\n"
-                "Status: Menunggu Validasi Petugas."
+                f"⚠️ *Pelanggaran:* {teks_pelanggaran}\n"
+                f"🔍 *PLAT NOMOR:* 👉 `{plat_terbaca}` 👈"
             )
             
-            # Kirim Screenshot + Surat Tilang
             with open(bukti_path, 'rb') as foto_bukti:
                 bot.send_photo(message.chat.id, foto_bukti, caption=surat_tilang, parse_mode='Markdown')
             os.remove(bukti_path)
             
         else:
-            bot.send_message(message.chat.id, "✅ *LAPORAN AMAN:* Tidak ditemukan pelanggar tanpa helm.", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "✅ *AMAN:* Tidak ada pelanggaran.", parse_mode='Markdown')
             
-        # Bersihin sampah file dari server
         os.remove(input_path)
         os.remove(output_path)
         
     except Exception as e:
-        bot.reply_to(message, f"❌ [ERROR] Gagal memproses: {e}")
-        print(f"Error Video: {e}")
+        bot.reply_to(message, f"❌ [ERROR] {e}")
 
-# --- 4. GERBANG PENERIMA VISION BUAT WEB HTML (TETAP ADA) ---
 @app.route('/vision', methods=['POST'])
-def vision_endpoint():
-    return jsonify({"status": "Mode Web sedang dinonaktifkan sementara untuk fokus ke Telegram"}), 200
-
-# --- 5. FUNGSI TELEGRAM & RUNNER ---
+def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message):
-    bot.reply_to(message, "🔴 ETLE SIAGA (VERSI 3 OTAK AI)!\nKirimkan VIDEO mentahan ke sini.")
-
-def run_bot():
-    bot.infinity_polling()
-
+def command_land(message): bot.reply_to(message, "🔴 ETLE CCTV MIRING AKTIF!")
+def run_bot(): bot.infinity_polling()
 if __name__ == '__main__':
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-    print(f"🔥 Server ETLE aktif di port {PORT}...")
+    threading.Thread(target=run_bot).start()
     app.run(host="0.0.0.0", port=PORT)
