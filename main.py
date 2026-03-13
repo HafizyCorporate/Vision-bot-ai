@@ -27,7 +27,7 @@ model_plat = YOLO('license_plate_detector.pt')
 print("Memuat Otak 3: Pembaca Huruf (OCR)...")
 reader = easyocr.Reader(['en'], gpu=False) 
 
-# --- FUNGSI TUKANG GAMBAR KOTAK (BERSIH TANPA GARIS) ---
+# --- FUNGSI TUKANG GAMBAR KOTAK ---
 def gambar_custom_kotak(frame, hasil_ai):
     frame_gambar = frame.copy()
     jumlah_pelanggar = 0
@@ -39,13 +39,11 @@ def gambar_custom_kotak(frame, hasil_ai):
         kelas_id = int(box.cls[0])
         nama_objek = model_helm.names[kelas_id].lower()
         
-        # LOGIKA CEK HELM
         if "no" in nama_objek or "without" in nama_objek or "bare" in nama_objek:
             warna = (0, 0, 255) # MERAH
             label = f"NO HELM {conf:.2f}"
             jumlah_pelanggar += 1
             area = (x2 - x1) * (y2 - y1)
-            # Cari kepala pelanggar yang paling gede/deket layar buat di-SS
             if area > max_area_pelanggar: 
                 max_area_pelanggar = area
         else:
@@ -62,7 +60,7 @@ def gambar_custom_kotak(frame, hasil_ai):
 # --- 3. FITUR UTAMA: RENDER VIDEO VIA TELEGRAM ---
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Video diterima! Mengaktifkan Radar Helm & Scanner Plat Nomor...")
+    bot.reply_to(message, "⚙️ [SYSTEM] Video diterima! Mengaktifkan Radar Helm & Scanner Plat Nomor (Mode Mata Elang)...")
     
     try:
         if message.content_type == 'video':
@@ -93,7 +91,6 @@ def handle_video(message):
             ret, frame = cap.read()
             if not ret: break
                 
-            # conf 0.20 biar tetep berani nangkep motor kejauhan
             results = model_helm(frame, conf=0.20, imgsz=640, verbose=False)
             frame_plotted, pelanggar_di_frame, max_area = gambar_custom_kotak(frame, results)
             
@@ -115,9 +112,8 @@ def handle_video(message):
             
         # --- KIRIM SS & OCR ---
         if best_evidence_frame is not None:
-            bot.send_message(message.chat.id, "🔍 *Mencari Plat Nomor pelanggar...*", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "🔍 *Mencuci & Mempertajam Foto Plat Nomor...*", parse_mode='Markdown')
             
-            # Otak Plat Nomor nyari letak plat di screenshot
             hasil_plat = model_plat(best_evidence_frame, conf=0.15, verbose=False)
             plat_terbaca = "Plat tidak terlihat di kamera"
             
@@ -126,11 +122,26 @@ def handle_video(message):
                 px1, py1, px2, py2 = map(int, box_plat.xyxy[0])
                 potongan_plat = best_evidence_frame[py1:py2, px1:px2]
                 
-                # OCR ngebaca potongan plat
-                teks_hasil = reader.readtext(potongan_plat, detail=0, mag_ratio=2.5)
+                # 🔥 TAKTIK ENHANCEMENT GAMBAR (MATA ELANG) 🔥
+                # 1. Zoom gambar 3x lipat biar mulus
+                plat_zoom = cv2.resize(potongan_plat, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                 
-                if teks_hasil: plat_terbaca = " ".join(teks_hasil).upper()
-                else: plat_terbaca = "Terdeteksi Plat, huruf buram"
+                # 2. Ubah jadi Hitam Putih (Grayscale) biar AI gak bingung warna
+                plat_hitam_putih = cv2.cvtColor(plat_zoom, cv2.COLOR_BGR2GRAY)
+                
+                # 3. Baca pakai OCR (Paksa HANYA baca huruf dan angka!)
+                teks_hasil = reader.readtext(
+                    plat_hitam_putih, 
+                    detail=0, 
+                    mag_ratio=2.0, 
+                    allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                )
+                
+                if teks_hasil: 
+                    # Gabungin hasilnya kalau bacanya sepotong-sepotong
+                    plat_terbaca = "".join(teks_hasil).replace(" ", "")
+                else: 
+                    plat_terbaca = "Terdeteksi Plat, tapi huruf terlalu buram"
                     
                 cv2.rectangle(best_evidence_frame, (px1, py1), (px2, py2), (255, 0, 0), 3) 
                 cv2.putText(best_evidence_frame, "PLAT", (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
@@ -165,7 +176,7 @@ def handle_video(message):
 def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message): bot.reply_to(message, "🔴 ETLE V3 (SNIPER PLAT) AKTIF!")
+def command_land(message): bot.reply_to(message, "🔴 ETLE MATA ELANG AKTIF!")
 
 def run_bot(): bot.infinity_polling()
 
