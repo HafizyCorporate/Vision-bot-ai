@@ -34,9 +34,10 @@ def vision_endpoint():
         image_arr = np.frombuffer(image_bytes, dtype=np.uint8)
         img = cv2.imdecode(image_arr, cv2.IMREAD_COLOR)
         
-        # Eksekusi Otak AI
-        results = model(img)
-        
+                # Eksekusi Otak AI (Tuning: Sensitivitas tinggi, ukuran gambar dimaksimalkan)
+        # conf=0.15 artinya AI akan menyorot objek walau dia cuma 15% yakin
+        results = model(img, conf=0.15, imgsz=640) 
+
         ada_deteksi = False
         pelanggaran_helm = False
         daftar_objek = []
