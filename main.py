@@ -27,75 +27,118 @@ model_plat = YOLO('license_plate_detector.pt')
 print("Memuat Otak 3: Pembaca Huruf (OCR)...")
 reader = easyocr.Reader(['en'], gpu=False) 
 
-print("Memuat Otak 4: Pelacak Motor (Anti Pejalan Kaki)...")
-model_motor = YOLO('yolov8n.pt') # Otomatis download file 3MB dari Ultralytics
+print("Memuat Otak 4: Pelacak Kendaraan (Anti Pejalan Kaki & Anti Timestamp)...")
+model_kendaraan = YOLO('yolov8n.pt')
 
-# --- FUNGSI TUKANG GAMBAR HELM, PLAT & ANTI PEJALAN KAKI ---
-def gambar_semua(frame, hasil_helm, hasil_plat, hasil_motor):
+# --- FUNGSI TUKANG GAMBAR LOGIKA TINGKAT TINGGI ---
+def gambar_semua(frame, hasil_helm, hasil_plat, hasil_kendaraan, prev_motors):
     frame_gambar = frame.copy()
     jumlah_pelanggar = 0
     max_area_pelanggar = 0
     
-    # 1. Simpan Koordinat Semua Motor yang Lewat
-    daftar_motor = []
-    for box in hasil_motor[0].boxes:
-        mx1, my1, mx2, my2 = map(int, box.xyxy[0])
-        daftar_motor.append((mx1, my1, mx2, my2))
-        # Gambar kotak tipis warna putih buat menandai bodi motor
-        cv2.rectangle(frame_gambar, (mx1, my1), (mx2, my2), (255, 255, 255), 1)
+    semua_kendaraan = [] # Buat filter plat nomor
+    motor_berjalan = []
+    motor_berhenti = []
+    pusat_motor_baru = [] # Buat sensor gerak frame berikutnya
     
-    # 2. Gambar Semua Plat Nomor di Video (Kotak Biru)
+    # 1. ANALISIS KENDARAAN & SENSOR GERAK
+    for box in hasil_kendaraan[0].boxes:
+        kx1, ky1, kx2, ky2 = map(int, box.xyxy[0])
+        kelas_id = int(box.cls[0])
+        
+        # Simpan semua kendaraan (Mobil, Motor, Bus, Truk) buat validasi plat
+        if kelas_id in [2, 3, 5, 7]: 
+            semua_kendaraan.append((kx1, ky1, kx2, ky2))
+            
+        # KHUSUS MOTOR (Class 3): Cek apakah dia jalan atau berhenti
+        if kelas_id == 3:
+            cx, cy = (kx1 + kx2) // 2, (ky1 + ky2) // 2
+            pusat_motor_baru.append((cx, cy))
+            
+            is_moving = True
+            if prev_motors:
+                # Hitung jarak dengan motor di frame sebelumnya
+                distances = [np.sqrt((cx - px)**2 + (cy - py)**2) for px, py in prev_motors]
+                if min(distances) < 2.0: # Jika bergerak kurang dari 2 pixel = Berhenti
+                    is_moving = False
+                    
+            if is_moving:
+                motor_berjalan.append((kx1, ky1, kx2, ky2))
+            else:
+                motor_berhenti.append((kx1, ky1, kx2, ky2))
+
+    # 2. VALIDASI PLAT NOMOR (Haram ngebaca tanggal CCTV)
+    kotak_plat_valid = []
     for box in hasil_plat[0].boxes:
         px1, py1, px2, py2 = map(int, box.xyxy[0])
-        cv2.rectangle(frame_gambar, (px1, py1), (px2, py2), (255, 0, 0), 2)
-        cv2.putText(frame_gambar, "PLAT", (px1, py1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+        pcx, pcy = (px1 + px2) // 2, (py1 + py2) // 2
         
-    # 3. Gambar Helm (Sambil Mengecek Nempel Motor atau Nggak)
+        valid = False
+        for (vx1, vy1, vx2, vy2) in semua_kendaraan:
+            # Plat harus berada di dalam / dekat bodi kendaraan
+            if vx1 - 50 < pcx < vx2 + 50 and vy1 - 50 < pcy < vy2 + 50:
+                valid = True
+                break
+                
+        if valid:
+            kotak_plat_valid.append((px1, py1, px2, py2))
+            cv2.rectangle(frame_gambar, (px1, py1), (px2, py2), (255, 0, 0), 2)
+            cv2.putText(frame_gambar, "PLAT", (px1, py1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+    # 3. VALIDASI HELM, PEJALAN KAKI, DAN STATUS BERHENTI
     for box in hasil_helm[0].boxes:
         hx1, hy1, hx2, hy2 = map(int, box.xyxy[0])
         conf = float(box.conf[0])
         kelas_id = int(box.cls[0])
         nama_objek = model_helm.names[kelas_id].lower()
         
-        # LOGIKA ANTI PEJALAN KAKI (Cek Irisan Kotak)
-        nempel_motor = False
-        for (mx1, my1, mx2, my2) in daftar_motor:
-            # Jika kotak kepala overlap/bersentuhan dengan kotak motor
-            if not (hx2 < mx1 or hx1 > mx2 or hy2 < my1 or hy1 > my2):
-                nempel_motor = True
-                break
+        hcx, hcy = (hx1 + hx2) // 2, (hy1 + hy2) // 2
         
-        # PENGKONDISIAN WARNA & TILANG
-        if "no" in nama_objek or "without" in nama_objek or "bare" in nama_objek:
-            if nempel_motor:
-                warna = (0, 0, 255) # MERAH (Joki Motor No Helm)
+        status_pengendara = "PEJALAN_KAKI"
+        
+        # Cek apakah nempel sama motor jalan? (Padding atas 100px biar kepala nggak dianggep melayang)
+        for (mx1, my1, mx2, my2) in motor_berjalan:
+            if mx1 - 50 < hcx < mx2 + 50 and my1 - 100 < hcy < my2 + 50:
+                status_pengendara = "JALAN"
+                break
+                
+        # Kalau bukan jalan, cek apakah nempel motor berhenti?
+        if status_pengendara == "PEJALAN_KAKI":
+            for (mx1, my1, mx2, my2) in motor_berhenti:
+                if mx1 - 50 < hcx < mx2 + 50 and my1 - 100 < hcy < my2 + 50:
+                    status_pengendara = "BERHENTI"
+                    break
+
+        # LOGIKA TILANG
+        if status_pengendara == "PEJALAN_KAKI":
+            warna = (128, 128, 128)
+            label = "PEJALAN KAKI"
+        elif status_pengendara == "BERHENTI":
+            warna = (0, 255, 255) # KUNING
+            label = "BERHENTI (AMAN)"
+        elif status_pengendara == "JALAN":
+            if "no" in nama_objek or "without" in nama_objek or "bare" in nama_objek:
+                warna = (0, 0, 255) # MERAH
                 label = f"NO HELM {conf:.2f}"
                 jumlah_pelanggar += 1
                 area = (hx2 - hx1) * (hy2 - hy1)
                 if area > max_area_pelanggar: 
                     max_area_pelanggar = area
             else:
-                warna = (128, 128, 128) # ABU-ABU (Pejalan Kaki No Helm)
-                label = "PEJALAN KAKI"
-        else:
-            if nempel_motor:
-                warna = (0, 255, 0) # HIJAU (Joki Motor Pakai Helm)
+                warna = (0, 255, 0) # HIJAU
                 label = f"HELM {conf:.2f}"
-            else:
-                warna = (128, 128, 128) # ABU-ABU (Pejalan Kaki Pakai Topi/Helm)
-                label = "PEJALAN KAKI"
-            
+                
         cv2.rectangle(frame_gambar, (hx1, hy1), (hx2, hy2), warna, 2)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame_gambar, (hx1, hy1 - 20), (hx1 + tw, hy1), warna, -1)
         cv2.putText(frame_gambar, label, (hx1, hy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-    return frame_gambar, jumlah_pelanggar, max_area_pelanggar
+    return frame_gambar, jumlah_pelanggar, max_area_pelanggar, pusat_motor_baru, kotak_plat_valid
 
 # --- 3. FITUR UTAMA: RENDER VIDEO VIA TELEGRAM ---
 @bot.message_handler(content_types=['video', 'document'])
 def handle_video(message):
-    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video (Resolusi HD)... AI melacak Motor, Helm, Plat, dan menyaring Pejalan Kaki!")
+    bot.reply_to(message, "⚙️ [SYSTEM] Memproses Video... Mengaktifkan Sensor Gerak & Validasi Plat Anti-Timestamp!")
     
     try:
         if message.content_type == 'video':
@@ -121,7 +164,10 @@ def handle_video(message):
         largest_violator_ever = 0
         best_evidence_frame = None 
         best_clean_frame = None
+        best_plat_boxes = []
         waktu_kejadian_ms = 0
+        
+        prev_motors = [] # Variabel penyimpan sensor gerak
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -129,18 +175,20 @@ def handle_video(message):
                 
             waktu_saat_ini_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
                 
-            # Scan Motor (Class 3), Helm & Plat dengan resolusi besar
-            results_motor = model_motor(frame, conf=0.15, classes=[3], imgsz=1280, verbose=False)
+            results_kendaraan = model_kendaraan(frame, conf=0.15, classes=[2, 3, 5, 7], imgsz=1280, verbose=False)
             results_helm = model_helm(frame, conf=0.05, imgsz=1920, verbose=False)
             results_plat = model_plat(frame, conf=0.05, imgsz=1920, verbose=False)
             
-            frame_plotted, pelanggar_di_frame, area_pelanggar = gambar_semua(frame, results_helm, results_plat, results_motor)
+            frame_plotted, pelanggar_jalan, area_pelanggar, prev_motors, plat_valid = gambar_semua(
+                frame, results_helm, results_plat, results_kendaraan, prev_motors
+            )
             
-            # Kunci momen saat PELANGGAR MOTOR paling deket sama kamera
+            # Kunci Screenshot HANYA SAAT PELANGGAR BERJALAN & PALING JELAS
             if area_pelanggar > largest_violator_ever:
                 largest_violator_ever = area_pelanggar
                 best_evidence_frame = frame_plotted.copy()
                 best_clean_frame = frame.copy() 
+                best_plat_boxes = plat_valid
                 waktu_kejadian_ms = waktu_saat_ini_ms
                 
             out.write(frame_plotted)
@@ -148,23 +196,21 @@ def handle_video(message):
         cap.release()
         out.release()
         
-        # --- 1. KIRIM VIDEO YANG SUDAH DIGAMBAR KOTAK ---
+        # --- 1. KIRIM VIDEO ---
         with open(output_path, 'rb') as video_file:
-            bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\nAI mengabaikan Pejalan Kaki (Kotak Abu-abu).", parse_mode='Markdown')
+            bot.send_video(message.chat.id, video_file, caption="🎥 *REKAMAN SELESAI*\nAI Pintar: Mengabaikan Pejalan Kaki & Motor Berhenti.", parse_mode='Markdown')
             
         # --- 2. JIKA ADA PELANGGAR, KIRIM SCREENSHOT + OCR ---
         if best_evidence_frame is not None and largest_violator_ever > 0:
             bot.send_message(message.chat.id, "🚨 *Pelanggar Ditemukan!* Mengekstrak Plat Nomor target...", parse_mode='Markdown')
             
-            hasil_plat = model_plat(best_clean_frame, conf=0.05, imgsz=1920, verbose=False)
-            
             plat_pelanggar = "Tidak Terbaca / Buram"
             max_plat_area = 0
             box_plat_terbaik = None
             
-            if len(hasil_plat[0].boxes) > 0:
-                for box in hasil_plat[0].boxes:
-                    px1, py1, px2, py2 = map(int, box.xyxy[0])
+            # Ambil plat dari kotak plat valid (bebas dari tulisan tanggal CCTV)
+            if len(best_plat_boxes) > 0:
+                for (px1, py1, px2, py2) in best_plat_boxes:
                     p_area = (px2 - px1) * (py2 - py1)
                     if p_area > max_plat_area:
                         max_plat_area = p_area
@@ -174,7 +220,6 @@ def handle_video(message):
                     px1, py1, px2, py2 = box_plat_terbaik
                     potongan_plat = best_clean_frame[py1:py2, px1:px2]
                     
-                    # Zoom natural buat dibaca OCR
                     plat_zoom = cv2.resize(potongan_plat, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                     teks_hasil = reader.readtext(plat_zoom, detail=0, allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ')
                     
@@ -192,7 +237,7 @@ def handle_video(message):
             bukti_path = "bukti_tilang.jpg"
             cv2.imwrite(bukti_path, best_evidence_frame)
             
-            # --- FORMAT LAPORAN RAPI ---
+            # FORMAT LAPORAN MINTAAN BOS
             surat_tilang = (
                 f"No plat : `{plat_pelanggar}`\n"
                 f"Pelanggarannya : Tidak Menggunakan Helm\n"
@@ -204,7 +249,7 @@ def handle_video(message):
             os.remove(bukti_path)
             
         else:
-            bot.send_message(message.chat.id, "✅ *AMAN:* Tidak ada pengendara motor tanpa helm di video ini.", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "✅ *AMAN:* Tidak ada pengendara motor melanggar yang bergerak/jalan di video ini.", parse_mode='Markdown')
             
         os.remove(input_path)
         os.remove(output_path)
@@ -216,7 +261,7 @@ def handle_video(message):
 def vision_endpoint(): return jsonify({"status": "Web dinonaktifkan"}), 200
 
 @bot.message_handler(commands=['start', 'land'])
-def command_land(message): bot.reply_to(message, "🔴 ETLE ANTI-PEJALAN KAKI AKTIF!")
+def command_land(message): bot.reply_to(message, "🔴 ETLE PINTAR (ANTI-BUG) AKTIF!")
 
 def run_bot(): bot.infinity_polling()
 
