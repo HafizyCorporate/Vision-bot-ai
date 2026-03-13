@@ -93,7 +93,10 @@ def handle_video(message):
             if not ret:
                 break
                 
-            results = model(frame, conf=0.35, verbose=False)
+                        # conf=0.20 (Nyali diturunin biar berani nebak)
+            # imgsz=640 (Kacamata pembesar biar resolusi frame dinaikkan pas di-scan)
+            results = model(frame, conf=0.20, imgsz=640, verbose=False)
+
             frame_plotted, pelanggar_di_frame, max_area = gambar_custom_kotak(frame, results)
             
             if pelanggar_di_frame > max_pelanggar_terekam:
